@@ -5,14 +5,20 @@ Each round hides a deterministic operator `#` that maps integer pairs `(a, b)` t
 
 ## Running the game
 
-Basic:
+With UV (recommended):
+
+```bash
+uv run numbergame.py --play
+```
+
+Or with additional options:
+
+```bash
+uv run numbergame.py --play --generator tree --heldout_k 2 --difficulty 1
+```
+
+Alternatively, run directly with Python:
 
 ```bash
 python numbergame.py --play
-```
-
-** Recommended: **
-
-```bash
-python3 numbergame.py --play --generator tree --heldout_k 2 --difficulty 1
 ```

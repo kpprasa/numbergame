@@ -1,0 +1,10 @@
+[project]
+name = "numbergame"
+version = "0.1.0"
+description = "A rule-inference / active-learning game"
+readme = "readme.md"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+numbergame = "numbergame:main"
