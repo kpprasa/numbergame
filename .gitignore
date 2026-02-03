@@ -191,6 +191,12 @@ cython_debug/
 # Ruff stuff:
 .ruff_cache/
 
+# LLM evaluation runs
+runs/
+
+# Analysis of above runs
+analysis/
+
 # PyPI configuration file
 .pypirc
 

@@ -187,7 +187,15 @@ class DSLInfoL3:
     generator: Optional[GeneratorInfo] = None
 
 
-DSLInfo = Union[DSLInfoL1, DSLInfoL2, DSLInfoL3]
+@dataclass(frozen=True)
+class DSLInfoL4:
+    """DSL information for difficulty level 4 (key dimensions only)."""
+
+    key_output_sizes: Tuple[int, ...]
+    note: str
+
+
+DSLInfo = Union[DSLInfoL1, DSLInfoL2, DSLInfoL3, DSLInfoL4]
 
 
 # ------------------- Observation System -------------------
@@ -206,6 +214,7 @@ class Observation:
 
     # Game-specific fields (None when no active game)
     n: Optional[int] = None
+    game_index: Optional[int] = None
     target_query: Optional[Tuple[int, int]] = None
     examples: Tuple[Tuple[int, int, int], ...] = ()
     phase: Literal["PLAY", "TEST"] = "PLAY"
@@ -231,6 +240,8 @@ class Observation:
 
         if self.n is not None:
             result["n"] = self.n
+        if self.game_index is not None:
+            result["game_index"] = self.game_index
         if self.target_query is not None:
             result["target_query"] = self.target_query
         result["examples"] = list(self.examples)
@@ -297,6 +308,12 @@ class Observation:
                         "max_depth": self.dsl.generator.max_depth,
                         "allowed_split_types": self.dsl.generator.allowed_split_types,
                     }
+
+            elif isinstance(self.dsl, DSLInfoL4):
+                result["dsl"] = {
+                    "key_output_sizes": list(self.dsl.key_output_sizes),
+                    "note": self.dsl.note,
+                }
 
         return result
 
@@ -404,6 +421,7 @@ class EnvConfig:
     num_features: Tuple[int, int] = (3, 5)
 
     generator_archetype: GeneratorArchetype = "tree"
+    min_tree_depth: int = 2
 
     heldout_k: int = 3  # test post lock in
 
@@ -420,6 +438,9 @@ class EnvConfig:
     no_repeat_pairs_within_game: bool = False
 
     q_illposed: float = 0.0
+    allow_set_membership_splits: bool = (
+        False  # this can be enabled to increase complexity
+    )
 
     def __post_init__(self):
         if self.difficulty >= 3:
@@ -490,6 +511,8 @@ class LUTEnv:
         self.time_spent = 0
         self.accuracy = 0
         self.meta = 0
+        self.games_completed = 0
+        self.outcome_counts: Dict[str, int] = {}
 
         self.game: Optional[GameState] = None
         self.run_over = False
@@ -500,6 +523,8 @@ class LUTEnv:
         self.time_spent = 0
         self.accuracy = 0
         self.meta = 0
+        self.games_completed = 0
+        self.outcome_counts = {}
         self.run_over = False
         self.game = self._generate_new_game()
         return self._make_observation()
@@ -528,6 +553,7 @@ class LUTEnv:
             if self.game and not self.game.is_over:
                 self.game.is_over = True
                 self.game.outcome = "TIMEOUT"
+                self._record_outcome(self.game.outcome)
             self.run_over = True
             return StepResult(
                 self._make_observation(),
@@ -547,6 +573,10 @@ class LUTEnv:
         return StepResult(
             self._make_observation(), self.run_over, self._info("ok"), event=event
         )
+
+    def _record_outcome(self, outcome: Outcome) -> None:
+        """Record an outcome in the frequency counts."""
+        self.outcome_counts[outcome] = self.outcome_counts.get(outcome, 0) + 1
 
     # ------------------- DSL / oracle -------------------
 
@@ -647,19 +677,27 @@ class LUTEnv:
             DecisionTreeLUT instance
         """
 
-        max_depths = {1: 3, 2: 3, 3: 4, 4: 4}
+        max_depths = {1: 3, 2: 3, 3: 4, 4: 4, 5: 5}
         max_depth = max_depths[difficulty]
 
-        stop_probs = {1: 0.35, 2: 0.25, 3: 0.15, 4: 0.10}
+        stop_probs = {1: 0.35, 2: 0.25, 3: 0.15, 4: 0.10, 5: 0.05}
         stop_prob = stop_probs[difficulty]
 
-        allow_set_splits = difficulty >= 2
+        min_depth = self.cfg.min_tree_depth
 
         root = self._build_tree_node(
-            output_sizes, n, max_depth, 0, stop_prob, allow_set_splits
+            output_sizes,
+            n,
+            max_depth,
+            0,
+            stop_prob,
+            self.cfg.allow_set_membership_splits,
+            min_depth,
         )
 
-        metadata = self._compute_tree_metadata(root, max_depth, allow_set_splits)
+        metadata = self._compute_tree_metadata(
+            root, max_depth, self.cfg.allow_set_membership_splits
+        )
 
         return DecisionTreeLUT(root, metadata)
 
@@ -671,9 +709,16 @@ class LUTEnv:
         current_depth: int,
         stop_prob: float,
         allow_set_splits: bool,
+        min_depth: int = 1,
     ) -> DecisionTreeNode:
-        """Recursively build a decision tree node."""
-        if current_depth >= max_depth or self.rng.random() < stop_prob:
+        """Recursively build a decision tree node.
+
+        Note: current_depth represents edges from root. max_depth is the max edges allowed.
+        """
+        # Enforce minimum depth - don't stop before reaching it
+        if current_depth >= max_depth or (
+            current_depth >= min_depth and self.rng.random() < stop_prob
+        ):
             return DecisionTreeNode(is_leaf=True, output=self.rng.randrange(n))
 
         weights = [size for size in output_sizes]
@@ -698,7 +743,7 @@ class LUTEnv:
         if dim_size >= 3:
             possible_splits.append("threshold")
 
-        # Set-membership split (for difficulty >= 2 and output_size >= 2)
+        # Set-membership split (if enabled and output_size >= 2)
         if allow_set_splits and dim_size >= 2:
             possible_splits.append("set")
 
@@ -717,10 +762,22 @@ class LUTEnv:
             split_value = frozenset(self.rng.sample(range(dim_size), set_size))
 
         left = self._build_tree_node(
-            output_sizes, n, max_depth, current_depth + 1, stop_prob, allow_set_splits
+            output_sizes,
+            n,
+            max_depth,
+            current_depth + 1,
+            stop_prob,
+            allow_set_splits,
+            min_depth,
         )
         right = self._build_tree_node(
-            output_sizes, n, max_depth, current_depth + 1, stop_prob, allow_set_splits
+            output_sizes,
+            n,
+            max_depth,
+            current_depth + 1,
+            stop_prob,
+            allow_set_splits,
+            min_depth,
         )
 
         return DecisionTreeNode(
@@ -735,10 +792,16 @@ class LUTEnv:
     def _compute_tree_metadata(
         self, root: DecisionTreeNode, max_depth: int, allow_set_splits: bool
     ) -> Dict[str, Any]:
-        """Compute metadata about the tree structure."""
+        """Compute metadata about the tree structure.
+
+        Depth is reported as edges (not nodes) to match standard tree terminology.
+        """
 
         def traverse(node: DecisionTreeNode) -> Tuple[int, int, int]:
-            """Returns (depth, num_leaves, num_internal_nodes)."""
+            """Returns (node_depth, num_leaves, num_internal_nodes).
+
+            node_depth counts nodes on longest path (leaf = 1).
+            """
             if node.is_leaf:
                 return (1, 1, 0)
 
@@ -751,7 +814,7 @@ class LUTEnv:
 
             return (depth, num_leaves, num_internal)
 
-        depth, num_leaves, num_internal = traverse(root)
+        node_depth, num_leaves, num_internal = traverse(root)
 
         allowed_split_types = ["threshold", "equality"]
         if allow_set_splits:
@@ -760,7 +823,7 @@ class LUTEnv:
         return {
             "archetype": "decision_tree",
             "max_depth": max_depth,
-            "realized_depth": depth,
+            "realized_depth": node_depth - 1,  # Convert nodes to edges
             "num_leaves": num_leaves,
             "num_internal_nodes": num_internal,
             "allowed_split_types": allowed_split_types,
@@ -828,6 +891,9 @@ class LUTEnv:
         temp.true_answer = true_answer
         temp.true_key = true_key
 
+        # Protect target query from being revealed as an example
+        temp.seen_pairs.add((x, y))
+
         if self.rng.random() < self.cfg.q_illposed:
             self._inject_ill_posed_contradictions(temp)
 
@@ -860,7 +926,6 @@ class LUTEnv:
                             if len(pairs_with_key) >= 2:
                                 break
 
-                # Inject contradictions
                 if len(pairs_with_key) >= 2:
                     # First pair gets LUT output, second gets different output
                     a2, b2 = pairs_with_key[1]
@@ -898,6 +963,9 @@ class LUTEnv:
         for _ in range(2000):
             a = self.rng.randrange(0, n)
             b = self.rng.randrange(0, n)
+            # Never reveal the target query
+            if (a, b) == (game.x, game.y):
+                continue
             if (not self.cfg.no_repeat_pairs_within_game) or (
                 (a, b) not in game.seen_pairs
             ):
@@ -906,11 +974,15 @@ class LUTEnv:
                 game.seen_pairs.add((a, b))
                 return
 
-        a = self.rng.randrange(0, n)
-        b = self.rng.randrange(0, n)
-        c, k = self._oracle(game, a, b)
-        game.examples.append(Example(a, b, c, k))
-        game.seen_pairs.add((a, b))
+        # Fallback: find any non-target pair
+        for _ in range(2000):
+            a = self.rng.randrange(0, n)
+            b = self.rng.randrange(0, n)
+            if (a, b) != (game.x, game.y):
+                c, k = self._oracle(game, a, b)
+                game.examples.append(Example(a, b, c, k))
+                game.seen_pairs.add((a, b))
+                return
 
     # ------------------- actions -------------------
 
@@ -980,9 +1052,11 @@ class LUTEnv:
                 self.accuracy += reward_delta
                 self.game.outcome = "LOCK_IN_CORRECT_NO_TEST"
                 self.game.is_over = True
+                self._record_outcome(self.game.outcome)
 
                 ended_game = self.game
                 if self.cfg.auto_advance_on_lock:
+                    self.games_completed += 1
                     self.game = self._generate_new_game()
 
                 return RoundEndEvent(
@@ -1004,9 +1078,11 @@ class LUTEnv:
                 self.game.outcome = "LOCK_IN_WRONG_INCONSISTENT"
 
             self.game.is_over = True
+            self._record_outcome(self.game.outcome)
 
             ended_game = self.game
             if self.cfg.auto_advance_on_lock:
+                self.games_completed += 1
                 self.game = self._generate_new_game()
 
             return RoundEndEvent(
@@ -1028,8 +1104,10 @@ class LUTEnv:
             self.game.outcome = "TEST_SUBMIT_INVALID"
             self.game.test_phase = False
             self.game.is_over = True
+            self._record_outcome(self.game.outcome)
 
             ended_game = self.game
+            self.games_completed += 1
             self.game = self._generate_new_game()
 
             return RoundEndEvent(
@@ -1055,8 +1133,10 @@ class LUTEnv:
 
         self.game.test_phase = False
         self.game.is_over = True
+        self._record_outcome(self.game.outcome)
 
         ended_game = self.game
+        self.games_completed += 1
         self.game = self._generate_new_game()
 
         return RoundEndEvent(
@@ -1076,9 +1156,11 @@ class LUTEnv:
         self.meta += meta_delta
         self.game.outcome = "ABANDON_RIGHTFUL" if rightful else "ABANDON_WRONGFUL"
         self.game.is_over = True
+        self._record_outcome(self.game.outcome)
 
         ended_game = self.game
         if self.cfg.auto_advance_on_abandon:
+            self.games_completed += 1
             self.game = self._generate_new_game()
 
         return RoundEndEvent(
@@ -1089,8 +1171,8 @@ class LUTEnv:
         )
 
     # ------------------- consistency checks -------------------
-
-    def _detect_pair_conflicts(self, examples: List[Example]) -> bool:
+    @staticmethod
+    def _detect_pair_conflicts(examples: List[Example]) -> bool:
         """Detect if same (a,b) pair has different outputs (always safe to expose)."""
         seen_pairs: Dict[Tuple[int, int], int] = {}
         for e in examples:
@@ -1100,7 +1182,8 @@ class LUTEnv:
             seen_pairs[pair] = e.c
         return False
 
-    def _detect_key_conflicts(self, examples: List[Example]) -> bool:
+    @staticmethod
+    def _detect_key_conflicts(examples: List[Example]) -> bool:
         """Detect if same key has different outputs (only expose when DSL revealed)."""
         seen_keys: Dict[Tuple[int, ...], int] = {}
         for e in examples:
@@ -1109,7 +1192,8 @@ class LUTEnv:
             seen_keys[e.key] = e.c
         return False
 
-    def _exists_any_lut_solution(self, examples: List[Example]) -> bool:
+    @staticmethod
+    def _exists_any_lut_solution(examples: List[Example]) -> bool:
         seen: Dict[Tuple[int, ...], int] = {}
         for e in examples:
             if e.key in seen and seen[e.key] != e.c:
@@ -1130,7 +1214,6 @@ class LUTEnv:
         return 0 <= proposed_answer < self.cfg.n
 
     # ------------------- bookkeeping / observations -------------------
-
     def _time_cost_for_action(self, act: ActionType) -> int:
         if act == "POLL_PASSIVE":
             return self.cfg.c_poll
@@ -1167,14 +1250,16 @@ class LUTEnv:
             # Shouldn't happen with type checking, but be defensive
             event = RejectedEvent(action_type=action.type, reason="unknown_action_type")
 
-        return game, event
+        # Return self.game (not the parameter) because action handlers may replace it
+        return self.game, event
 
     def _instructions_block(self) -> Dict:
         difficulty_hints = {
             1: "Full key formula + observed key map revealed",
             2: "Selected feature names + output_sizes shown (order unknown)",
             3: "Full feature pool shown (selected features unknown)",
-            4: "No DSL information (black box)",
+            4: "Key structure revealed (feature identities unknown)",
+            5: "No DSL information (pure pattern recognition)",
         }
 
         return {
@@ -1321,7 +1406,14 @@ class LUTEnv:
                 generator=generator_info,
             )
 
-        # Difficulty 4: Show nothing (dsl_info remains None)
+        elif self.cfg.difficulty == 4:
+            # Difficulty 4: Show only key dimensions
+            dsl_info = DSLInfoL4(
+                key_output_sizes=self.game.key_output_sizes,
+                note="Key structure revealed. Feature identities unknown.",
+            )
+
+        # Difficulty 5: Show nothing (dsl_info remains None)
 
         return Observation(
             status="run_over" if self.run_over else "running",
@@ -1331,6 +1423,7 @@ class LUTEnv:
             meta=self.meta,
             allowed_commands=allowed_commands,
             n=self.cfg.n,
+            game_index=self.games_completed,
             target_query=(self.game.x, self.game.y),
             examples=tuple((e.a, e.b, e.c) for e in self.game.examples),
             phase="TEST" if self.game.test_phase else "PLAY",
@@ -1359,19 +1452,20 @@ class LUTEnv:
 # ----------------------------
 
 
-def _print_decision_tree(
+def _format_decision_tree(
     node: DecisionTreeNode, prefix: str = "", is_last: bool = True
-) -> None:
-    """Pretty-print a decision tree.
+) -> str:
+    """Format a decision tree as a string.
 
     Branch navigation:
     - First branch (├──): condition is TRUE
     - Second branch (└──): condition is FALSE
     """
+    lines = []
     connector = "└── " if is_last else "├── "
 
     if node.is_leaf:
-        print(f"{prefix}{connector}Leaf: output={node.output}")
+        lines.append(f"{prefix}{connector}Leaf: output={node.output}")
     else:
         if node.split_type == "threshold":
             condition = f"k[{node.split_dim}] <= {node.split_value}"
@@ -1382,62 +1476,109 @@ def _print_decision_tree(
         else:
             condition = f"k[{node.split_dim}] ? {node.split_value}"
 
-        print(f"{prefix}{connector}Split: {condition}")
+        lines.append(f"{prefix}{connector}Split: {condition}")
 
         extension = "    " if is_last else "│   "
-        _print_decision_tree(node.left, prefix + extension, False)
-        _print_decision_tree(node.right, prefix + extension, True)
+        lines.append(_format_decision_tree(node.left, prefix + extension, False))
+        lines.append(_format_decision_tree(node.right, prefix + extension, True))
+
+    return "\n".join(lines)
 
 
-def _print_instructions(cfg: EnvConfig) -> None:
-    print("\n" + "=" * 78)
-    print("NEW GAME - INSTRUCTIONS")
-    print("=" * 78)
-    print("Goal: Use examples to predict the output for the target query.")
-    print("      Then LOCK_IN your answer, or ABANDON if the game is ill-posed.")
-    print("\nActions (with time costs):")
-    print(f"  poll           - Get random example (cost: {cfg.c_poll})")
-    print(f"  query <a> <b>  - Get example for specific (a,b) (cost: {cfg.c_active})")
-    print(f"  lock <answer>  - Submit target prediction (cost: {cfg.c_lock})")
-    print("                   If wrong: round ends immediately and auto-advances.")
-    print("                   If correct: enters held-out test phase (no points yet).")
-    print(
+def _print_decision_tree(
+    node: DecisionTreeNode, prefix: str = "", is_last: bool = True
+) -> None:
+    """Pretty-print a decision tree."""
+    print(_format_decision_tree(node, prefix, is_last))
+
+
+def format_instructions(cfg: EnvConfig) -> str:
+    """Format game instructions as a string."""
+    lines = []
+    lines.append("\n" + "=" * 78)
+    lines.append("NEW GAME - INSTRUCTIONS")
+    lines.append("=" * 78)
+    lines.append("Goal: Use examples to predict the output for the target query.")
+    lines.append(
+        "      Then LOCK_IN your answer, or ABANDON ONLY if the game is ill-posed."
+    )
+    lines.append(
+        "\nNote: The game structure remains consistent across rounds (same DSL, same"
+    )
+    lines.append(
+        "      generator type). The specific rule changes each game, but your approach"
+    )
+    lines.append("      and learnings from previous games can inform future strategy.")
+    lines.append("\nActions (with time costs):")
+    lines.append(f"  poll           - Get random example (cost: {cfg.c_poll})")
+    lines.append(
+        f"  query <a> <b>  - Get example for specific (a,b) (cost: {cfg.c_active})"
+    )
+    lines.append(f"  lock <answer>  - Submit target prediction (cost: {cfg.c_lock})")
+    lines.append(
+        "                   If wrong: round ends immediately and auto-advances."
+    )
+    lines.append(
+        "                   If correct: enters held-out test phase (no points yet)."
+    )
+    lines.append(
         f"  submit <y1>... - Submit answers for {cfg.heldout_k} held-out queries (cost: 0)"
     )
-    print(
+    lines.append(
         f"                   Perfect submission earns +{cfg.base_reward}. Ends round."
     )
-    print(
+    lines.append(
         f"  abandon        - Quit this game and auto-advance to next (cost: {cfg.c_quit})"
     )
-    print("\nDifficulty Level:", cfg.difficulty)
+    lines.append(
+        "                   WARNING: Wrongful abandon loses 1 meta point! Only abandon when"
+    )
+    lines.append(
+        "                   examples contain CONTRADICTIONS (same key → different outputs)."
+    )
+    lines.append("\nDifficulty Level: " + str(cfg.difficulty))
     if cfg.difficulty == 1:
-        print("  - Full key formula + observed key map revealed")
+        lines.append("  - Full key formula + observed key map revealed")
     elif cfg.difficulty == 2:
-        print("  - Selected feature names + output_sizes shown (order unknown)")
+        lines.append("  - Selected feature names + output_sizes shown (order unknown)")
     elif cfg.difficulty == 3:
-        print("  - Full feature pool shown (selected features unknown)")
+        lines.append("  - Full feature pool shown (selected features unknown)")
     elif cfg.difficulty == 4:
-        print("  - No DSL information (black box)")
-    print(
+        lines.append("  - Key structure revealed (feature identities unknown)")
+    elif cfg.difficulty == 5:
+        lines.append("  - No DSL information (pure pattern recognition)")
+    lines.append(
         f"\nInconsistent penalties: {'ENABLED' if cfg.penalize_inconsistent_wrong else 'DISABLED'}"
     )
     if cfg.q_illposed > 0:
-        print(f"Ill-posed games: {cfg.q_illposed * 100:.0f}% of games may be ill-posed")
-    print("\nScoring:")
-    print("  Points are awarded only from the held-out test after correct lock-in:")
-    print(
+        lines.append(
+            f"Ill-posed games: {cfg.q_illposed * 100:.0f}% of games may be ill-posed"
+        )
+    lines.append("\nScoring:")
+    lines.append("  Accuracy (from held-out test after correct lock-in):")
+    lines.append(
         f"    - Perfect test (all {cfg.heldout_k} queries correct): +{cfg.base_reward}"
     )
-    print("    - Any wrong: +0")
-    print(
+    lines.append("    - Any wrong: +0")
+    lines.append(
         f"  Wrong lock-in: 0 for consistent, -{cfg.base_reward} for inconsistent"
         if cfg.penalize_inconsistent_wrong
         else "  Wrong lock-in: +0"
     )
-    print("  Meta: +1 for rightful abandon, -1 for wrongful abandon")
-    print(f"  Time budget: {cfg.lifetime_time_budget} (run ends when exhausted)")
-    print("=" * 78 + "\n")
+    lines.append("\n  Meta points (track game understanding):")
+    lines.append("    - Rightful abandon (contradictions exist): +1 meta")
+    lines.append("    - Wrongful abandon (no contradictions): -1 meta (PENALTY!)")
+    lines.append("    STRATEGY: Lock in your best guess. Only abandon when you've")
+    lines.append("              detected actual contradictions in the data.")
+    lines.append(
+        f"\n  Time budget: {cfg.lifetime_time_budget} (run ends when exhausted)"
+    )
+    lines.append("=" * 78 + "\n")
+    return "\n".join(lines)
+
+
+def _print_instructions(cfg: EnvConfig) -> None:
+    print(format_instructions(cfg))
 
 
 def _print_help(cfg: EnvConfig) -> None:
@@ -1466,109 +1607,189 @@ Commands:
 """)
 
 
-def _print_obs(obs: Dict) -> None:
-    print("\n" + "=" * 78)
-    print(f"Status: {obs['status']}")
-    print(f"Time: {obs['time_spent']} spent | {obs['time_remaining']} remaining")
-    print(f"Scores: accuracy={obs['accuracy']} | meta={obs['meta']}")
-    print(f"Domain: 0..{obs.get('n', '?') - 1 if 'n' in obs else '?'}")
+def format_observation(obs: Dict) -> str:
+    """Format observation as a string."""
+    lines = []
+    lines.append("\n" + "=" * 78)
+    lines.append(f"Status: {obs['status']}")
+    lines.append(f"Time: {obs['time_spent']} spent | {obs['time_remaining']} remaining")
+    lines.append(f"Scores: accuracy={obs['accuracy']} | meta={obs['meta']}")
+    lines.append(f"Domain: 0..{obs.get('n', '?') - 1 if 'n' in obs else '?'}")
 
     if obs.get("reward_hint") is not None:
-        print(f"Reward hint: {obs['reward_hint']}")
+        lines.append(f"Reward hint: {obs['reward_hint']}")
 
     if obs.get("pair_conflicts_detected"):
-        print(
+        lines.append(
             "!! Pair conflict: same (a,b) with different outputs (non-deterministic) !!"
         )
     if obs.get("key_conflicts_detected"):
-        print("!! Key conflict: same key with different outputs (contradiction) !!")
+        lines.append(
+            "!! Key conflict: same key with different outputs (contradiction) !!"
+        )
 
     if "dsl" in obs:
         dsl = obs["dsl"]
 
         if "key_definition" in dsl:
             # Difficulty 1: Full revelation
-            print(f"DSL: {dsl['key_definition']}")
+            lines.append(f"DSL: {dsl['key_definition']}")
             if "generator" in dsl:
                 gen = dsl["generator"]
-                print(f"Generator: {gen['archetype']}")
-                print(
+                lines.append(f"Generator: {gen['archetype']}")
+                lines.append(
                     f"  Depth: max={gen['max_depth']}, realized={gen['realized_depth']}"
                 )
-                print(
-                    f"  Nodes: {gen['num_leaves']} leaves, "
-                    f"{gen['num_internal_nodes']} internal"
-                )
-                print(f"  Split types: {', '.join(gen['allowed_split_types'])}")
-            print("Examples (a # b = c) [key shown]:")
+                lines.append(f"  Split types: {', '.join(gen['allowed_split_types'])}")
+            lines.append("Examples (a # b = c) [key shown]:")
             for a, b, c, k in obs.get("examples_with_keys", []):
-                print(f"  {a} # {b} = {c}   key={k}")
+                lines.append(f"  {a} # {b} = {c}   key={k}")
             x, y = obs["target_query"]
-            print(f"Target query: {x} # {y} = ?   (target key={obs.get('target_key')})")
+            lines.append(
+                f"Target query: {x} # {y} = ?   (target key={obs.get('target_key')})"
+            )
             if obs.get("observed_key_map"):
-                print("Observed key→value map:", obs["observed_key_map"])
+                lines.append("Observed key→value map: " + str(obs["observed_key_map"]))
 
         elif "selected_features" in dsl:
             # Difficulty 2: Feature names + output_sizes (unordered)
-            print("Selected features (unordered):")
+            lines.append("Selected features (unordered):")
             for feat in dsl["selected_features"]:
-                print(f"  {feat['name']} (output_size {feat['output_size']})")
+                lines.append(f"  {feat['name']} (output_size {feat['output_size']})")
             if "generator" in dsl:
                 gen = dsl["generator"]
-                print(f"Generator: {gen['archetype']}")
-                print(
+                lines.append(f"Generator: {gen['archetype']}")
+                lines.append(
                     f"  Depth: max={gen['max_depth']}, realized={gen['realized_depth']}"
                 )
-                print(
-                    f"  Nodes: {gen['num_leaves']} leaves, "
-                    f"{gen['num_internal_nodes']} internal"
-                )
-                print(f"  Split types: {', '.join(gen['allowed_split_types'])}")
-            print("Examples (a # b = c) [key shown]:")
+                lines.append(f"  Split types: {', '.join(gen['allowed_split_types'])}")
+            lines.append("Examples (a # b = c) [key shown]:")
             for a, b, c, k in obs.get("examples_with_keys", []):
-                print(f"  {a} # {b} = {c}   key={k}")
+                lines.append(f"  {a} # {b} = {c}   key={k}")
             x, y = obs["target_query"]
-            print(f"Target query: {x} # {y} = ?")
+            lines.append(f"Target query: {x} # {y} = ?")
 
         elif "feature_pool" in dsl:
             # Difficulty 3: Full pool (selected unknown)
-            print("Feature pool (subset selected for this game):")
+            lines.append("Feature pool (subset selected for this game):")
             for feat in dsl["feature_pool"]:
-                print(f"  {feat['name']} (output_size {feat['output_size']})")
+                lines.append(f"  {feat['name']} (output_size {feat['output_size']})")
             if "generator" in dsl:
                 gen = dsl["generator"]
-                print(f"Generator: {gen['archetype']}")
-                print(f"  Max depth: {gen['max_depth']}")
-                print(f"  Split types: {', '.join(gen['allowed_split_types'])}")
-            print("Examples (a # b = c):")
+                lines.append(f"Generator: {gen['archetype']}")
+                lines.append(f"  Max depth: {gen['max_depth']}")
+                lines.append(f"  Split types: {', '.join(gen['allowed_split_types'])}")
+            lines.append("Examples (a # b = c):")
             for a, b, c in obs.get("examples", []):
-                print(f"  {a} # {b} = {c}")
+                lines.append(f"  {a} # {b} = {c}")
             x, y = obs["target_query"]
-            print(f"Target query: {x} # {y} = ?")
+            lines.append(f"Target query: {x} # {y} = ?")
+
+        elif "key_output_sizes" in dsl:
+            # Difficulty 4: Show only key dimensions
+            lines.append(f"Key dimensions: {dsl['key_output_sizes']}")
+            lines.append(f"Note: {dsl['note']}")
+            lines.append("Examples (a # b = c):")
+            for a, b, c in obs.get("examples", []):
+                lines.append(f"  {a} # {b} = {c}")
+            x, y = obs["target_query"]
+            lines.append(f"Target query: {x} # {y} = ?")
     else:
-        # Difficulty 4: No DSL info
-        print("Examples (a # b = c):")
+        # Difficulty 5: No DSL info (pure black box)
+        lines.append(
+            "Hint: There is an underlying structured pattern that can be learned."
+        )
+        lines.append("Examples (a # b = c):")
         for a, b, c in obs.get("examples", []):
-            print(f"  {a} # {b} = {c}")
+            lines.append(f"  {a} # {b} = {c}")
         x, y = obs.get("target_query", ("?", "?"))
-        print(f"Target query: {x} # {y} = ?")
+        lines.append(f"Target query: {x} # {y} = ?")
 
     if obs.get("test_phase"):
-        print("\n" + "=" * 78)
-        print("TEST PHASE: Submit answers for held-out queries")
-        print("=" * 78)
-        print(
+        lines.append("\n" + "=" * 78)
+        lines.append("TEST PHASE: Submit answers for held-out queries")
+        lines.append("=" * 78)
+        lines.append(
             "You correctly answered the target query! Now predict outputs for these held-out queries:"
         )
         for i, (a, b) in enumerate(obs["heldout_queries"], 1):
-            print(f"  Query {i}: {a} # {b} = ?")
-        print(
+            lines.append(f"  Query {i}: {a} # {b} = ?")
+        lines.append(
             f"\nUse 'submit <y1> <y2> ... <y{len(obs['heldout_queries'])}>' to submit your predictions."
         )
-        print("All predictions must be correct to earn +100 points.")
-        print("=" * 78)
+        lines.append("All predictions must be correct to earn +100 points.")
+        lines.append("=" * 78)
 
-    print("=" * 78)
+    lines.append("=" * 78)
+    return "\n".join(lines)
+
+
+def format_event(event: Event) -> str:
+    """Format event as a string (what the human sees in terminal)."""
+    if isinstance(event, EventNone):
+        return ""
+    elif isinstance(event, RejectedEvent):
+        return f"Action rejected ({event.action_type}): {event.reason}"
+    elif isinstance(event, EnterTestEvent):
+        lines = []
+        lines.append("\n✓ Correct target!")
+        lines.append(
+            f"Proceeding to test phase with {event.heldout_k} held-out queries..."
+        )
+        lines.append("(Answer all test queries correctly to earn +100 points)")
+        return "\n".join(lines)
+    elif isinstance(event, RoundEndEvent):
+        outcome = event.outcome
+        reward_delta = event.reward_delta
+        meta_delta = event.meta_delta
+        generator = event.generator
+
+        lines = []
+        if outcome == "LOCK_IN_CORRECT_NO_TEST":
+            lines.append(
+                f"\n✓ Correct answer! (No held-out available, +{reward_delta} points)"
+            )
+        elif outcome == "LOCK_IN_WRONG_CONSISTENT":
+            lines.append(
+                "\n❌ Wrong answer (but consistent with observations). +0 points"
+            )
+        elif outcome == "LOCK_IN_WRONG_INCONSISTENT":
+            lines.append(
+                f"\n❌ Wrong answer (inconsistent with observations). {reward_delta} points"
+            )
+        elif outcome == "TEST_SUBMIT_CORRECT":
+            lines.append(f"\n🎉🎉 Perfect test score! +{reward_delta} points!")
+        elif outcome == "TEST_SUBMIT_WRONG":
+            lines.append("\n❌ Test failed. Some predictions were incorrect. +0 points")
+        elif outcome == "TEST_SUBMIT_INVALID":
+            lines.append(
+                "\n❌ Invalid test submission (wrong number of predictions). +0 points"
+            )
+        elif outcome == "ABANDON_RIGHTFUL":
+            lines.append(f"\n✓ Rightful abandon! Meta +{meta_delta}")
+        elif outcome == "ABANDON_WRONGFUL":
+            lines.append(f"\n✗ Wrongful abandon. Meta {meta_delta}")
+        elif outcome == "TIMEOUT":
+            lines.append("\n⏰ Time budget exhausted.")
+        else:
+            lines.append(f"\nRound ended: {outcome}")
+
+        # Include decision tree if available (part of what human sees)
+        if generator is not None and isinstance(generator, DecisionTreeLUT):
+            lines.append("\n" + "=" * 78)
+            lines.append("COMPLETED GAME - TRUE DECISION TREE REVEALED")
+            lines.append("(First branch ├── = TRUE, Second branch └── = FALSE)")
+            lines.append("=" * 78)
+            lines.append(_format_decision_tree(generator.root))
+            lines.append("=" * 78)
+
+        return "\n".join(lines)
+    else:
+        return ""
+
+
+def _print_obs(obs: Dict) -> None:
+    print(format_observation(obs))
 
 
 def play_terminal(cfg: EnvConfig, seed: Optional[int] = None) -> None:
@@ -1670,52 +1891,10 @@ def play_terminal(cfg: EnvConfig, seed: Optional[int] = None) -> None:
 
         obs = res.observation.to_dict()
 
-        if isinstance(res.event, EventNone):
-            pass
-        elif isinstance(res.event, RejectedEvent):
-            print(f"Action rejected ({res.event.action_type}): {res.event.reason}")
-        elif isinstance(res.event, EnterTestEvent):
-            print("\n✓ Correct target!")
-            print(
-                f"Proceeding to test phase with {res.event.heldout_k} held-out queries..."
-            )
-            print("(Answer all test queries correctly to earn +100 points)")
-        elif isinstance(res.event, RoundEndEvent):
-            outcome = res.event.outcome
-            reward_delta = res.event.reward_delta
-            meta_delta = res.event.meta_delta
-            generator = res.event.generator
-
-            if outcome == "LOCK_IN_CORRECT_NO_TEST":
-                print(
-                    f"\n✓ Correct answer! (No held-out available, +{reward_delta} points)"
-                )
-            elif outcome == "LOCK_IN_WRONG_CONSISTENT":
-                print("\n❌ Wrong answer (but consistent with observations). +0 points")
-            elif outcome == "LOCK_IN_WRONG_INCONSISTENT":
-                print(
-                    f"\n❌ Wrong answer (inconsistent with observations). {reward_delta} points"
-                )
-            elif outcome == "TEST_SUBMIT_CORRECT":
-                print(f"\n🎉🎉 Perfect test score! +{reward_delta} points!")
-            elif outcome == "TEST_SUBMIT_WRONG":
-                print("\n❌ Test failed. Some predictions were incorrect. +0 points")
-            elif outcome == "TEST_SUBMIT_INVALID":
-                print(
-                    "\n❌ Invalid test submission (wrong number of predictions). +0 points"
-                )
-            elif outcome == "ABANDON_RIGHTFUL":
-                print(f"\n✓ Rightful abandon! Meta +{meta_delta}")
-            elif outcome == "ABANDON_WRONGFUL":
-                print(f"\n✗ Wrongful abandon. Meta {meta_delta}")
-
-            if generator is not None and isinstance(generator, DecisionTreeLUT):
-                print("\n" + "=" * 78)
-                print("COMPLETED GAME - DECISION TREE STRUCTURE")
-                print("(First branch ├── = TRUE, Second branch └── = FALSE)")
-                print("=" * 78)
-                _print_decision_tree(generator.root)
-                print("=" * 78)
+        # Print event feedback (includes decision tree if applicable)
+        event_msg = format_event(res.event)
+        if event_msg:
+            print(event_msg)
 
         if env.game and not env.game.instructions_shown:
             _print_instructions(cfg)
@@ -1752,8 +1931,8 @@ def main(argv: List[str]) -> int:
         "--difficulty",
         type=int,
         default=1,
-        choices=[1, 2, 3, 4],
-        help="Difficulty level (1=easiest, 4=hardest)",
+        choices=[1, 2, 3, 4, 5],
+        help="Difficulty level (1=easiest, 5=hardest)",
     )
     ap.add_argument("--max_keys", type=int, default=128, help="Maximum key space size")
 
