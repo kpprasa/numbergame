@@ -1,0 +1,23 @@
+# Evaluation configuration for LLM testing
+
+env:
+  seed: 42
+  n: 16
+  lifetime: 50
+  seed_examples: 3
+  c_poll: 1
+  c_active: 2
+  c_lock: 1
+  c_quit: 1
+  active_includes_passive: false
+  q_illposed: 0.0
+  difficulty: 1
+  max_keys: 128
+  generator: tree
+  min_tree_depth: 2
+  heldout_k: 2
+  reward_info: perfect
+
+llm:
+  model: claude-opus-4-5
+  reasoning_effort: high

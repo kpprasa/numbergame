@@ -32,3 +32,30 @@ Alternatively, run directly with Python:
 ```bash
 python numbergame.py --play
 ```
+
+## LLM Evaluation
+
+Test LLM agents on numbergame.
+
+**Setup**: Create a `.env` file with your OpenAI API key:
+```bash
+cp .env.template .env
+# Edit .env and add your key
+```
+
+**Batch mode** (runs to completion):
+```bash
+uv run test_gpt.py
+```
+
+**Interactive mode** (step through with debugger):
+```bash
+uv run test_gpt.py --interactive
+```
+
+**Custom config**:
+```bash
+uv run test_gpt.py --config my_config.yaml
+```
+
+Results are saved to `runs/{timestamp}_gpt.jsonl` with full episode replay data (observations, actions, reasoning, events). Configure via `eval_config.yaml`.
