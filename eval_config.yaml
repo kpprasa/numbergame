@@ -19,5 +19,5 @@ env:
   reward_info: perfect
 
 llm:
-  model: claude-opus-4-5
+  model: gemini-3.1-pro-preview
   reasoning_effort: high

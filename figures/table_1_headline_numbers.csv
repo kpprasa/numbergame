@@ -1,0 +1,4 @@
+Model,Time / LOCK_IN game (↓),% correct among LOCK_IN (↑),Time / correct (↓)
+Claude,2.71,29.8%,9.12
+Gemini,3.28,29.2%,11.24
+GPT,4.69,48.5%,9.67

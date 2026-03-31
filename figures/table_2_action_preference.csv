@@ -1,0 +1,4 @@
+Model,Query (%),Poll (%),Lock In (%),Total Actions
+Claude,30.0,1.5,35.7,263
+Gemini,34.9,2.9,32.4,238
+GPT,18.1,40.7,21.8,349

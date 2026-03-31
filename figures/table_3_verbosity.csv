@@ -1,0 +1,4 @@
+Model,Actions,Avg words/action
+Claude,263,373.16
+Gemini,238,507.43
+GPT,149,185.85

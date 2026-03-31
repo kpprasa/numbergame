@@ -34,6 +34,10 @@ def analyze_run_file(filepath: Path) -> Counter:
                             action = 'query'
                         elif 'lock' in action:
                             action = 'lock_in'
+                        elif 'test_submit' in action:
+                            action = 'test_submit'
+                        elif 'abandon' in action:
+                            action = 'abandon'
 
                         action_counts[action] += 1
             except json.JSONDecodeError:
@@ -112,19 +116,26 @@ def main():
 
         if total_actions > 0:
             print(f"  Overall Action Distribution:")
-            for action in ['query', 'poll', 'lock_in']:
+            for action in ['query', 'poll', 'lock_in', 'test_submit', 'abandon']:
                 count = total_counts.get(action, 0)
                 percentage = (count / total_actions) * 100
-                print(f"    {action.upper():<10}: {count:>4} ({percentage:>5.1f}%)")
+                if count > 0:  # Only show actions that occurred
+                    print(f"    {action.upper():<12}: {count:>4} ({percentage:>5.1f}%)")
 
-            # Check for any other actions
+            # Check for any other unexpected actions
+            tracked_actions = ['query', 'poll', 'lock_in', 'test_submit', 'abandon']
             other_actions = {k: v for k, v in total_counts.items()
-                           if k not in ['query', 'poll', 'lock_in']}
+                           if k not in tracked_actions}
             if other_actions:
-                print(f"    OTHER     : {sum(other_actions.values()):>4} "
+                print(f"    OTHER       : {sum(other_actions.values()):>4} "
                       f"({sum(other_actions.values())/total_actions*100:>5.1f}%)")
                 for action, count in other_actions.items():
                     print(f"      - {action}: {count}")
+
+            # Verify totals
+            counted = sum(total_counts.get(a, 0) for a in tracked_actions)
+            if counted != total_actions:
+                print(f"    ⚠️  WARNING: Counted actions ({counted}) != Total ({total_actions})")
 
         print()
         print(f"  Individual run files:")
@@ -134,10 +145,11 @@ def main():
             print(f"    {file_info['name']}")
             print(f"      Total actions: {total}")
             if total > 0:
-                for action in ['query', 'poll', 'lock_in']:
+                for action in ['query', 'poll', 'lock_in', 'test_submit', 'abandon']:
                     count = counts.get(action, 0)
                     percentage = (count / total) * 100
-                    print(f"        {action.upper():<10}: {count:>3} ({percentage:>5.1f}%)")
+                    if count > 0:  # Only show actions that occurred
+                        print(f"        {action.upper():<12}: {count:>3} ({percentage:>5.1f}%)")
 
         print()
         print("-" * 80)
@@ -148,7 +160,7 @@ def main():
     print("SUMMARY COMPARISON")
     print("=" * 80)
     print()
-    print(f"{'Model':<10} {'Total':<8} {'Query':<15} {'Poll':<15} {'Lock In':<15}")
+    print(f"{'Model':<10} {'Total':<8} {'Query':<15} {'Poll':<15} {'Lock In':<15} {'Test Submit':<15} {'Abandon':<15}")
     print("-" * 80)
 
     for model in ['gpt', 'claude', 'gemini']:
@@ -163,11 +175,22 @@ def main():
             query_pct = (total_counts.get('query', 0) / total) * 100
             poll_pct = (total_counts.get('poll', 0) / total) * 100
             lock_in_pct = (total_counts.get('lock_in', 0) / total) * 100
+            test_submit_pct = (total_counts.get('test_submit', 0) / total) * 100
+            abandon_pct = (total_counts.get('abandon', 0) / total) * 100
+
+            # Verify the sum
+            counted = (total_counts.get('query', 0) + total_counts.get('poll', 0) +
+                      total_counts.get('lock_in', 0) + total_counts.get('test_submit', 0) +
+                      total_counts.get('abandon', 0))
+            status = " ✓" if counted == total else f" ⚠️ ({counted}/{total})"
 
             print(f"{model.upper():<10} {total:<8} "
                   f"{total_counts.get('query', 0):>3} ({query_pct:>4.1f}%)   "
                   f"{total_counts.get('poll', 0):>3} ({poll_pct:>4.1f}%)   "
-                  f"{total_counts.get('lock_in', 0):>3} ({lock_in_pct:>4.1f}%)")
+                  f"{total_counts.get('lock_in', 0):>3} ({lock_in_pct:>4.1f}%)   "
+                  f"{total_counts.get('test_submit', 0):>3} ({test_submit_pct:>4.1f}%)   "
+                  f"{total_counts.get('abandon', 0):>3} ({abandon_pct:>4.1f}%)"
+                  f"{status}")
 
     print()
 

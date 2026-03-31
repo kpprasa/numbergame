@@ -132,10 +132,11 @@ def main():
         'runs': [],
         'total_successful_games': 0,
         'total_time_on_successful': 0,
-        'test_correct': 0,
-        'test_wrong': 0,
-        'lockin_correct': 0,
-        'lockin_wrong': 0
+        'test_submit_correct': 0,
+        'test_submit_wrong': 0,
+        'test_submit_invalid': 0,
+        'lock_in_wrong_consistent': 0,
+        'lock_in_wrong_inconsistent': 0
     })
 
     # Process all JSONL files
@@ -173,14 +174,19 @@ def main():
         # Count outcome types
         for game in stats['successful_games']:
             outcome = game['outcome']
-            if 'TEST_SUBMIT_CORRECT' in outcome:
-                model_results[model]['test_correct'] += 1
-            elif 'TEST_SUBMIT_WRONG' in outcome:
-                model_results[model]['test_wrong'] += 1
-            elif 'LOCK_IN_CORRECT' in outcome:
-                model_results[model]['lockin_correct'] += 1
-            elif 'LOCK_IN_WRONG' in outcome:
-                model_results[model]['lockin_wrong'] += 1
+            if outcome == 'TEST_SUBMIT_CORRECT':
+                model_results[model]['test_submit_correct'] += 1
+            elif outcome == 'TEST_SUBMIT_WRONG':
+                model_results[model]['test_submit_wrong'] += 1
+            elif outcome == 'TEST_SUBMIT_INVALID':
+                model_results[model]['test_submit_invalid'] += 1
+            elif outcome == 'LOCK_IN_WRONG_CONSISTENT':
+                model_results[model]['lock_in_wrong_consistent'] += 1
+            elif outcome == 'LOCK_IN_WRONG_INCONSISTENT':
+                model_results[model]['lock_in_wrong_inconsistent'] += 1
+            elif outcome != 'LOCK_IN_CORRECT_NO_TEST':
+                # Log any unexpected outcomes (excluding the ignored one)
+                print(f"  Warning: Unexpected outcome '{outcome}' in {filepath.name}")
 
     # Print results
     print("\n" + "=" * 80)
@@ -204,10 +210,11 @@ def main():
                 'avg_time': avg_time,
                 'num_runs': len(data['runs']),
                 'total_games': data['total_successful_games'],
-                'test_correct': data['test_correct'],
-                'test_wrong': data['test_wrong'],
-                'lockin_correct': data['lockin_correct'],
-                'lockin_wrong': data['lockin_wrong']
+                'test_submit_correct': data['test_submit_correct'],
+                'test_submit_wrong': data['test_submit_wrong'],
+                'test_submit_invalid': data['test_submit_invalid'],
+                'lock_in_wrong_consistent': data['lock_in_wrong_consistent'],
+                'lock_in_wrong_inconsistent': data['lock_in_wrong_inconsistent']
             })
 
     # Sort by avg_time (lower is better)
@@ -218,15 +225,31 @@ def main():
         print(f"   Average time per successful game: {result['avg_time']:.2f} time units")
         print(f"   Total successful games: {result['total_games']} (across {result['num_runs']} runs)")
         print(f"   Outcomes:")
-        print(f"     - TEST_SUBMIT_CORRECT: {result['test_correct']}")
-        print(f"     - TEST_SUBMIT_WRONG: {result['test_wrong']}")
-        print(f"     - LOCK_IN_CORRECT: {result['lockin_correct']}")
-        print(f"     - LOCK_IN_WRONG: {result['lockin_wrong']}")
+        print(f"     - TEST_SUBMIT_CORRECT: {result['test_submit_correct']}")
+        print(f"     - TEST_SUBMIT_WRONG: {result['test_submit_wrong']}")
+        print(f"     - TEST_SUBMIT_INVALID: {result['test_submit_invalid']}")
+        print(f"     - LOCK_IN_WRONG_CONSISTENT: {result['lock_in_wrong_consistent']}")
+        print(f"     - LOCK_IN_WRONG_INCONSISTENT: {result['lock_in_wrong_inconsistent']}")
 
-        total_outcomes = result['test_correct'] + result['test_wrong'] + result['lockin_correct'] + result['lockin_wrong']
+        total_outcomes = (result['test_submit_correct'] + result['test_submit_wrong'] +
+                         result['test_submit_invalid'] + result['lock_in_wrong_consistent'] +
+                         result['lock_in_wrong_inconsistent'])
+
+        # Verify totals match (accounting for LOCK_IN_CORRECT_NO_TEST which we ignore)
+        if total_outcomes > result['total_games']:
+            print(f"   ⚠️  WARNING: Counted outcomes ({total_outcomes}) exceed total games ({result['total_games']})")
+
+        # Calculate percentages
         if total_outcomes > 0:
-            test_success_rate = result['test_correct'] / (result['test_correct'] + result['test_wrong']) * 100 if (result['test_correct'] + result['test_wrong']) > 0 else 0
-            print(f"     - Test success rate: {test_success_rate:.1f}%")
+            print(f"\n   Percentages:")
+            print(f"     - TEST_SUBMIT_CORRECT: {result['test_submit_correct']/total_outcomes*100:.1f}%")
+            print(f"     - TEST_SUBMIT_WRONG: {result['test_submit_wrong']/total_outcomes*100:.1f}%")
+            print(f"     - TEST_SUBMIT_INVALID: {result['test_submit_invalid']/total_outcomes*100:.1f}%")
+            print(f"     - LOCK_IN_WRONG_CONSISTENT: {result['lock_in_wrong_consistent']/total_outcomes*100:.1f}%")
+            print(f"     - LOCK_IN_WRONG_INCONSISTENT: {result['lock_in_wrong_inconsistent']/total_outcomes*100:.1f}%")
+
+            test_success_rate = result['test_submit_correct'] / (result['test_submit_correct'] + result['test_submit_wrong']) * 100 if (result['test_submit_correct'] + result['test_submit_wrong']) > 0 else 0
+            print(f"\n   Test success rate: {test_success_rate:.1f}%")
 
     print("\n" + "=" * 80)
     print("INTERPRETATION:")

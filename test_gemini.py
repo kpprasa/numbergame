@@ -448,7 +448,11 @@ def main():
     llm_config = config["llm"]
 
     # Validate Gemini model
-    supported_models = ["gemini-3-pro-preview", "gemini-3-flash-preview"]
+    supported_models = [
+        "gemini-3.1-pro-preview",
+        "gemini-3-pro-preview",
+        "gemini-3-flash-preview",
+    ]
     if llm_config["model"] not in supported_models:
         raise ValueError(
             f"Unsupported Gemini model: {llm_config['model']}. "
